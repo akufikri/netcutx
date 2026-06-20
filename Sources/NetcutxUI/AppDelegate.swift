@@ -67,10 +67,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // ── Actions ───────────────────────────────────────────────
         menu.addItem(.separator())
 
-        let stopItem = NSMenuItem(title: "Stop All", action: #selector(stopAll), keyEquivalent: "s")
-        stopItem.target = self
-        stopItem.isEnabled = status?.running ?? false
-        menu.addItem(stopItem)
+        let isRunning = status?.running ?? false
+        if isRunning {
+            let stopItem = NSMenuItem(title: "Stop All", action: #selector(stopAll), keyEquivalent: "s")
+            stopItem.target = self
+            menu.addItem(stopItem)
+        } else {
+            let startItem = NSMenuItem(title: "Start All", action: #selector(scanNetwork), keyEquivalent: "s")
+            startItem.target = self
+            startItem.isEnabled = status != nil
+            menu.addItem(startItem)
+        }
 
         let scanItem = NSMenuItem(title: "Scan Network", action: #selector(scanNetwork), keyEquivalent: "r")
         scanItem.target = self
