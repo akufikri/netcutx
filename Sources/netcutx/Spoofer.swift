@@ -225,7 +225,7 @@ func sendRestore(bpf: NetcutxBPF, config: SpooferConfig) {
     }
 }
 
-private func setIPForwarding(_ enable: Bool) -> Bool {
+func setIPForwarding(_ enable: Bool) -> Bool {
     let value = enable ? "1" : "0"
     let task = Process()
     task.executableURL = URL(fileURLWithPath: "/usr/sbin/sysctl")

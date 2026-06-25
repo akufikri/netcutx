@@ -2,6 +2,16 @@ import Foundation
 
 typealias MACAddr = (UInt8, UInt8, UInt8, UInt8, UInt8, UInt8)
 
+enum DeviceType: String, Codable {
+    case android = "Android"
+    case iphone = "iPhone"
+    case windows = "Windows"
+    case linux = "Linux"
+    case macos = "macOS"
+    case router = "Router"
+    case unknown = "Unknown"
+}
+
 let broadcastMAC: MACAddr = (0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF)
 let etherTypeARP: UInt16 = 0x0806
 let arpRequest: UInt16 = 0x0001

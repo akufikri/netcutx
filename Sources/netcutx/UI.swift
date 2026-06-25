@@ -23,6 +23,7 @@ struct DeviceInfo {
     let hostname: String
     let isGateway: Bool
     let isSelf: Bool
+    var deviceType: DeviceType = .unknown
 }
 
 func showBanner() {
@@ -99,8 +100,8 @@ func showDeviceTableMulti(_ devices: [DeviceInfo]) -> [Int]? {
     print("")
     print(c(.bold, "  Device di jaringan:"))
     print("")
-    print("  \(pad("#", 3)) \(pad("IP", 16)) \(pad("MAC", 18)) \(pad("Hostname", 20))")
-    print("  \(String(repeating: "─", count: 60))")
+    print("  \(pad("#", 3)) \(pad("IP", 16)) \(pad("MAC", 18)) \(pad("Hostname", 20)) \(pad("OS", 12))")
+    print("  \(String(repeating: "─", count: 72))")
 
     for (i, d) in devices.enumerated() {
         let num = "\(i+1)"
@@ -108,8 +109,9 @@ func showDeviceTableMulti(_ devices: [DeviceInfo]) -> [Int]? {
         let ip = d.isGateway ? c(.yellow, pad(d.ip, 16)) : pad(d.ip, 16)
         let mac = pad(d.mac, 18)
         let host = d.hostname != "" ? pad(d.hostname, 20) : pad("-", 20)
+        let os = d.deviceType == .unknown ? pad("-", 12) : c(.cyan, pad(d.deviceType.rawValue, 12))
         let note = d.isGateway ? c(.yellow, " ← gateway") : (d.isSelf ? c(.dim, " ← kamu") : "")
-        print("\(tag) \(ip) \(mac) \(host) \(note)")
+        print("\(tag) \(ip) \(mac) \(host) \(os) \(note)")
     }
     print("")
     print(c(.dim, "  Pilih target [1-\(devices.count)] / pisah koma (mis: 3,4,5) / \"all\""), terminator: " ")

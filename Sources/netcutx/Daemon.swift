@@ -133,6 +133,60 @@ func upgradeDaemon() {
 
 // MARK: - Stop / Status
 
+func closeAll() {
+    guard getuid() == 0 else {
+        print("Error: close requires sudo")
+        exit(1)
+    }
+
+    // 1. Kill all netcutx processes (except self)
+    let selfPID = ProcessInfo.processInfo.processIdentifier
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+    task.arguments = ["-x", "netcutx"]
+    let out = Pipe()
+    task.standardOutput = out
+    if (try? task.run()) != nil {
+        task.waitUntilExit()
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        guard let pidStr = String(data: data, encoding: .utf8) else { return }
+        let pids = pidStr.components(separatedBy: "\n")
+            .compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
+            .filter { $0 != selfPID && $0 > 0 }
+        for pid in pids {
+            kill(pid, SIGTERM)
+            print("  Killed netcutx PID \(pid)")
+        }
+    }
+
+    _ = runCmd("/bin/launchctl", ["stop", daemonLabel])
+
+    // 2. Kill mitmproxy if running
+    _ = runCmd("/usr/bin/killall", ["mitmproxy", "mitmdump", "mitmweb"])
+
+    // 3. Flush pf rules
+    _ = runCmd("/sbin/pfctl", ["-a", "netcutx", "-F", "all"])
+    _ = runCmd("/sbin/pfctl", ["-F", "all"])
+
+    // 4. Disable IP forwarding
+    _ = runCmd("/usr/sbin/sysctl", ["-w", "net.inet.ip.forwarding=0"])
+
+    // 5. Clean temp files
+    try? FileManager.default.removeItem(atPath: "/tmp/netcutx_pf.conf")
+    try? FileManager.default.removeItem(atPath: "/tmp/netcutx_anchor.conf")
+    try? FileManager.default.removeItem(atPath: "/tmp/netcutx_wa_session.txt")
+    try? FileManager.default.removeItem(atPath: "/tmp/netcutx_creds.txt")
+    try? FileManager.default.removeItem(atPath: "/tmp/netcutx_cloud_cookies.txt")
+    try? FileManager.default.removeItem(atPath: "/tmp/netcutx_cloud_creds.txt")
+    try? FileManager.default.removeItem(atPath: "/tmp/netcutx_cloud.log")
+    try? FileManager.default.removeItem(atPath: "/tmp/netcutx_pf_backup")
+    try? FileManager.default.removeItem(atPath: "/tmp/netcutx_addons")
+    try? FileManager.default.removeItem(atPath: "/tmp/netcutx_images")
+    cleanPidFile()
+
+    print("netcutx closed — all processes killed, pf flushed, temp cleaned")
+}
+
 func stopAll() {
     guard let pid = readPid() else {
         // Try by launchctl bootout as fallback
@@ -251,12 +305,19 @@ func runDaemon() {
 
         let knownDevices = quickScanARPTable(gatewayIP: gw, ourIP: ourIP)
         let scanResult   = try? scanNetwork(bpf: bpf, ourMAC: ourMAC, ourIP: ourIP, gatewayIP: gw, ifname: ifname)
-        bpf.close()
 
         var allDevices = knownDevices
         for d in (scanResult?.devices ?? []) {
             if !allDevices.contains(where: { $0.ip == d.ip }) { allDevices.append(d) }
         }
+
+        let gwDevice = DeviceInfo(ip: gw, mac: macToString(gwMAC), hostname: "", isGateway: true, isSelf: false)
+        if !allDevices.contains(where: { $0.isGateway }) { allDevices.insert(gwDevice, at: 0) }
+
+        // OS fingerprint devices (non-blocking, best-effort)
+        fingerprintAllDevices(bpf: bpf, ourMAC: ourMAC, ourIP: ourIP, devices: &allDevices)
+
+        bpf.close()
 
         let targets = allDevices.filter {
             !$0.isGateway && !$0.isSelf && $0.ip != ourIP &&
@@ -378,7 +439,7 @@ func daemonLog(_ msg: String) {
 }
 
 @discardableResult
-private func runCmd(_ path: String, _ args: [String]) -> Int32 {
+func runCmd(_ path: String, _ args: [String]) -> Int32 {
     let t = Process()
     t.executableURL = URL(fileURLWithPath: path)
     t.arguments = args
