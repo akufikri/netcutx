@@ -169,7 +169,26 @@ func daemonStatus() {
 
 // MARK: - Daemon loop
 
+func killStaleDaemon() {
+    guard let oldPid = readPid() else { return }
+    if oldPid == ProcessInfo.processInfo.processIdentifier { return }
+    guard kill(oldPid, 0) == 0 else { return }
+
+    daemonLog("Stale daemon PID \(oldPid) — killing...")
+    kill(oldPid, SIGTERM)
+    var waited = 0
+    while kill(oldPid, 0) == 0 && waited < 30 {
+        Thread.sleep(forTimeInterval: 0.1)
+        waited += 1
+    }
+    if kill(oldPid, 0) == 0 {
+        kill(oldPid, SIGKILL)
+    }
+    daemonLog("Stale daemon killed")
+}
+
 func runDaemon() {
+    killStaleDaemon()
     writePid()
 
     // SIGTERM/SIGINT → stop both spoof loop and daemon loop
@@ -231,7 +250,7 @@ func runDaemon() {
         }
 
         let knownDevices = quickScanARPTable(gatewayIP: gw, ourIP: ourIP)
-        let scanResult   = try? scanNetwork(bpf: bpf, ourMAC: ourMAC, ourIP: ourIP, gatewayIP: gw)
+        let scanResult   = try? scanNetwork(bpf: bpf, ourMAC: ourMAC, ourIP: ourIP, gatewayIP: gw, ifname: ifname)
         bpf.close()
 
         var allDevices = knownDevices
@@ -239,7 +258,10 @@ func runDaemon() {
             if !allDevices.contains(where: { $0.ip == d.ip }) { allDevices.append(d) }
         }
 
-        let targets = allDevices.filter { !$0.isGateway && !$0.isSelf && $0.ip != ourIP }
+        let targets = allDevices.filter {
+            !$0.isGateway && !$0.isSelf && $0.ip != ourIP &&
+            !$0.ip.hasSuffix(".0") && !$0.ip.hasSuffix(".255")
+        }
         if targets.isEmpty {
             daemonLog("No targets found — will retry on next cycle")
             sharedState.update(active: false, targets: [], iface: ifname, ip: ourIP)

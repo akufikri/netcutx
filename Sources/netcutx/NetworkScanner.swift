@@ -4,24 +4,51 @@ struct ScanResult {
     let devices: [DeviceInfo]
 }
 
-func scanNetwork(bpf: NetcutxBPF, ourMAC: MACAddr, ourIP: String, gatewayIP: String) throws -> ScanResult {
-    let subnet = getSubnet(ourIP)
-    guard subnet != "" else { return ScanResult(devices: []) }
-
-    status("Scanning \(subnet).0/24...")
+func scanNetwork(bpf: NetcutxBPF, ourMAC: MACAddr, ourIP: String, gatewayIP: String, ifname: String? = nil, deep: Bool = false) throws -> ScanResult {
+    let netmask = ifname.flatMap { getInterfaceNetmask($0) } ?? "255.255.255.0"
+    let prefix = getCIDRPrefix(netmask)
+    let networkAddr = getNetworkAddress(ourIP, netmask) ?? ""
+    let broadcastAddr = getBroadcastAddress(ourIP, netmask) ?? ""
+    let networkParts = networkAddr.split(separator: ".")
+    let broadcastParts = broadcastAddr.split(separator: ".")
 
     var ipsToScan: [String] = []
-    for i in 1...254 {
-        ipsToScan.append("\(subnet).\(i)")
+    guard networkParts.count == 4, broadcastParts.count == 4 else {
+        return ScanResult(devices: [])
     }
 
-    for ip in ipsToScan {
-        if isSelfIP(ip, ourIP) { continue }
-        let req = ARPFrame.buildRequest(srcMAC: ourMAC, srcIP: ourIP, targetIP: ip)
-        try? bpf.send(frame: Data(req.bytes))
+    let firstOctet = Int(networkParts[3]) ?? 0
+    let lastOctet = Int(broadcastParts[3]) ?? 255
+
+    if prefix >= 24 {
+        let netBase = "\(networkParts[0]).\(networkParts[1]).\(networkParts[2])"
+        let start = firstOctet + 1
+        let end = lastOctet - 1
+        for i in max(start, 1)...min(end, 254) {
+            ipsToScan.append("\(netBase).\(i)")
+        }
+    } else {
+        for i in firstOctet + 1..<lastOctet {
+            ipsToScan.append("\(networkParts[0]).\(networkParts[1]).\(networkParts[2]).\(i)")
+        }
     }
 
-    Thread.sleep(forTimeInterval: 2.0)
+    let rounds = deep ? 3 : 1
+    let interRoundDelay: TimeInterval = deep ? 0.5 : 0
+
+    status("Deep scan \(deep ? "ON" : "OFF") — \(rounds)x burst, \(ipsToScan.count) hosts")
+    for round in 1...rounds {
+        if round > 1 { Thread.sleep(forTimeInterval: interRoundDelay) }
+        for ip in ipsToScan {
+            if isSelfIP(ip, ourIP) { continue }
+            let req = ARPFrame.buildRequest(srcMAC: ourMAC, srcIP: ourIP, targetIP: ip)
+            try? bpf.send(frame: Data(req.bytes))
+        }
+    }
+
+    let waitTime: TimeInterval = deep ? 12.0 : (ipsToScan.count > 100 ? 5.0 : ipsToScan.count > 50 ? 4.0 : 3.0)
+    status("Menunggu reply \(Int(waitTime))s...")
+    Thread.sleep(forTimeInterval: waitTime)
 
     var seen = Set<String>()
     var devices: [DeviceInfo] = []
@@ -29,8 +56,17 @@ func scanNetwork(bpf: NetcutxBPF, ourMAC: MACAddr, ourIP: String, gatewayIP: Str
     let startIP = ourIP
     let gw = gatewayIP
 
-    while true {
-        guard let packet = try bpf.receive(timeout: 0.1) else { break }
+    if deep {
+        Thread.sleep(forTimeInterval: 3)
+        for ip in ipsToScan {
+            if isSelfIP(ip, ourIP) { continue }
+            let req = ARPFrame.buildRequest(srcMAC: ourMAC, srcIP: ourIP, targetIP: ip)
+            try? bpf.send(frame: Data(req.bytes))
+        }
+    }
+
+    for _ in 0..<(deep ? 50 : 20) {
+        guard let packet = try bpf.receive(timeout: deep ? 0.3 : 0.1) else { break }
         guard let frame = ARPFrame(from: packet.data) else { continue }
         guard frame.isReply, let sip = frame.senderIP, let smac = frame.senderMAC else { continue }
         guard !seen.contains(sip) else { continue }
@@ -107,12 +143,6 @@ func quickScanARPTable(gatewayIP: String, ourIP: String) -> [DeviceInfo] {
         if d2.isGateway { return false }
         return d1.ip.localizedStandardCompare(d2.ip) == .orderedAscending
     }
-}
-
-private func getSubnet(_ ip: String) -> String {
-    let parts = ip.split(separator: ".")
-    guard parts.count == 4 else { return "" }
-    return "\(parts[0]).\(parts[1]).\(parts[2])"
 }
 
 private func isSelfIP(_ ip: String, _ ourIP: String) -> Bool {

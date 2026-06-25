@@ -102,3 +102,48 @@ func getInterfaceIP(_ ifname: String) -> String? {
     }
     return nil
 }
+
+func getInterfaceNetmask(_ ifname: String) -> String? {
+    var addr: UnsafeMutablePointer<ifaddrs>?
+    guard getifaddrs(&addr) == 0, let start = addr else { return nil }
+    defer { freeifaddrs(start) }
+    var ptr = start
+    while true {
+        let info = ptr.pointee
+        if let name = info.ifa_name, String(cString: name) == ifname {
+            let family = info.ifa_addr.pointee.sa_family
+            if family == AF_INET {
+                let netmask = info.ifa_netmask.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
+                var mask = netmask.sin_addr
+                var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                inet_ntop(AF_INET, &mask, &buf, socklen_t(INET_ADDRSTRLEN))
+                return String(cString: buf)
+            }
+        }
+        guard let next = info.ifa_next else { break }
+        ptr = next
+    }
+    return nil
+}
+
+func getCIDRPrefix(_ netmask: String) -> Int {
+    guard let bytes = ipToBytes(netmask) else { return 24 }
+    var count = 0
+    for byte in bytes {
+        count += byte.nonzeroBitCount
+    }
+    return count
+}
+
+func getNetworkAddress(_ ip: String, _ netmask: String) -> String? {
+    guard let ipBytes = ipToBytes(ip), let maskBytes = ipToBytes(netmask) else { return nil }
+    let net = zip(ipBytes, maskBytes).map { $0 & $1 }
+    return bytesToIP(net)
+}
+
+func getBroadcastAddress(_ ip: String, _ netmask: String) -> String? {
+    guard let ipBytes = ipToBytes(ip), let maskBytes = ipToBytes(netmask) else { return nil }
+    let wildcard = maskBytes.map { ~$0 & 0xFF }
+    let bcast = zip(ipBytes, wildcard).map { $0 | $1 }
+    return bytesToIP(bcast)
+}

@@ -46,7 +46,11 @@ func selectInterface() -> String? {
     guard let output = String(data: data, encoding: .utf8) else { return nil }
     let interfaces = output.trimmingCharacters(in: .whitespacesAndNewlines)
         .split(separator: " ")
-        .filter { $0.hasPrefix("en") }
+        .filter { name in
+            let s = String(name)
+            guard let ip = getInterfaceIP(s) else { return false }
+            return !ip.isEmpty && getInterfaceMAC(s) != nil
+        }
 
     var candidates: [(name: String, ip: String, mac: String)] = []
     for iface in interfaces {

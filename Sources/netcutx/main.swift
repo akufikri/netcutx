@@ -124,8 +124,8 @@ func interactiveMode() {
         ok("Ditemukan \(knownDevices.count) device dari ARP cache")
     }
 
-    status("Scan aktif (2 detik)...")
-    guard let scanResult = try? scanNetwork(bpf: bpf, ourMAC: ourMAC, ourIP: ourIP, gatewayIP: gw) else {
+    status("Scan aktif (deep)...")
+    guard let scanResult = try? scanNetwork(bpf: bpf, ourMAC: ourMAC, ourIP: ourIP, gatewayIP: gw, ifname: ifname, deep: true) else {
         fail("Scan jaringan gagal")
         return
     }
